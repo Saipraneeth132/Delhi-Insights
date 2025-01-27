@@ -381,6 +381,9 @@ if chart_data is None:
         predict_and_visualize(selected_date, f"home","92.4%")
         
 elif chart_data is not None:
+
+    st.info("This is actual data")
+
     # Filter for hourly data
     hourly_data = filter_hourly_data(chart_data)
 
