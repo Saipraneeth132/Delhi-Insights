@@ -1,0 +1,467 @@
+import streamlit as st
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
+from pathlib import Path
+import os
+import csv
+import holidays
+import joblib
+import datetime as dt
+import json
+import base64
+from io import BytesIO
+
+# Set the title and favicon that appear in the Browser's tab bar.
+st.set_page_config(
+    page_title='Delhi Insights',  # Appears in the browser tab
+    page_icon=':earth_americas:',  # This is an emoji shortcode. Could be a URL too.
+    layout="wide",
+)
+
+#-----------------------------------------------------------------------------
+# CUSTOM CSS FOR ENHANCED UI
+
+st.markdown(
+    """
+    <style>
+    .stDataFrame {
+        border: 1px solid #e1e4e8;
+        border-radius: 8px;
+        padding: 10px;
+    }
+    .stButton button {
+        background-color: #4CAF50;
+        color: white;
+        border-radius: 5px;
+        padding: 10px 20px;
+        font-size: 16px;
+    }
+    .stButton button:hover {
+        background-color: #45a049;
+    }
+    .stHeader {
+        font-size: 24px;
+        font-weight: bold;
+        color: #2c3e50;
+    }
+    .stSubheader {
+        font-size: 18px;
+        font-weight: bold;
+        color: #34495e;
+    }
+    .stMetric {
+        background-color: #f9f9f9;
+        border: 1px solid #e1e4e8;
+        border-radius: 8px;
+        padding: 15px;
+        text-align: center;
+    }
+    .metric-label {
+        font-size: 16px;
+        font-weight: bold;
+        color: #ffffff;
+        padding: 5px;
+        border-radius: 5px;
+    }
+    .metric-value {
+        font-size: 24px;
+        font-weight: bold;
+        color: #2c3e50;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+def colored_metric(label, value, delta=None, delta_color="normal"):
+    """
+    Displays a metric with custom colors.
+    """
+    st.markdown(
+        f"""
+        <div style="
+            padding: 10px;
+            border-radius: 10px;
+            background-color: #f0f2f6;
+            text-align: center;
+            margin: 5px;
+        ">
+            <div style="font-size: 14px; color: #555;">{label}</div>
+            <div style="font-size: 24px; font-weight: bold; color: #333;">{value}</div>
+            {f'<div style="font-size: 14px; color: {delta_color};">{delta}</div>' if delta else ''}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def download_button(df, filename, button_text):
+    """
+    Creates a download button for different file formats
+    """
+    if filename.endswith('.csv'):
+        data = df.to_csv(index=False)
+        mime = 'text/csv'
+        encoding = 'utf-8'
+    elif filename.endswith('.xlsx'):
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False)
+        data = output.getvalue()
+        mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        encoding = None
+    elif filename.endswith('.json'):
+        data = df.to_json(orient='records')
+        mime = 'application/json'
+        encoding = 'utf-8'
+    
+    if encoding:
+        b64 = base64.b64encode(data.encode(encoding)).decode()
+    else:
+        b64 = base64.b64encode(data).decode()
+        
+    href = f'data:{mime};base64,{b64}'
+    return f'<a href="{href}" download="{filename}"><button style="background-color: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 5px;">{button_text}</button></a>'
+
+#-----------------------------------------------------------------------------
+# DATE PICKER
+
+# Add a date picker for the user to select a date
+st.header("📅 Select a Date")
+selected_date = st.date_input("", datetime.now() - timedelta(days=1), key="date_picker")
+
+# Format the selected date to match the required format (YYYY-MM-DD)
+filedate = selected_date.strftime("%Y-%m-%d")
+
+#-----------------------------------------------------------------------------
+# DATA IMPORT AND PROCESSING
+
+def importdata(filedate, period):
+    year, month, day = filedate.split('-')
+    addre = f"{Path(__file__).parent}/data/load/{year}/{month}/{day}-{month}-{year}.csv"
+    if os.path.exists(addre):
+        return getcsvfile(addre, period)
+    else:
+        return scrapdate(year, month, day, period)
+
+def scrapdate(year, month, day, period):
+    url = "http://www.delhisldc.org/Loaddata.aspx?mode="
+    target_dir = "data/load"
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+        print("Target directory created.")
+
+    month_dir = os.path.join(target_dir, str(year), f"{month}")
+    date_str = f"{day}/{month}/{year}"
+
+    if not os.path.exists(month_dir):
+        os.makedirs(month_dir)
+        print(f"Directory created for {month}/{year}")
+
+    try:
+        input_date = datetime(int(year), int(month), int(day))
+        if input_date > datetime.now():
+            st.warning("Future data cannot be scraped.")
+            return None
+        else:
+            print(f"Scraping data for {date_str}")
+            response = requests.get(url + date_str)
+            soup = BeautifulSoup(response.text, 'lxml')
+            table = soup.find('table', {'id': 'ContentPlaceHolder3_DGGridAv'})
+
+            if table:
+                headers = [el.text.strip() for el in table.find_all('tr')[0].find_all('td')]
+                rows = [[el.text.strip() for el in row.find_all('td')] for row in table.find_all('tr')[1:]]
+
+                if len(rows) > 0:
+                    csv_filename = os.path.join(month_dir, f"{date_str.replace('/', '-')}.csv")
+                    if os.path.exists(csv_filename):
+                        os.remove(csv_filename)
+                        print(f"Removed existing CSV file: {csv_filename}")
+
+                    with open(csv_filename, 'a', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow(headers)
+                        writer.writerows(rows)
+
+                    df = pd.read_csv(csv_filename)
+                    df_clean = df.dropna()
+                    df_clean['Other'] = round((df_clean['DELHI'] - (df_clean['BRPL'] + df_clean['BYPL'] + df_clean['NDPL'] + df_clean['NDMC'] + df_clean['MES'])), 2)
+                    df_clean['Date'] = f"{date_str.replace('/', '-')}"
+                    df_clean['Date'] = pd.to_datetime(df_clean['Date'], format='%d-%m-%Y')
+                    
+                    def get_season(date):
+                        month = date.month
+                        if month in [12, 1, 2]:
+                            return 'Winter'
+                        elif month in [3, 4, 5]:
+                            return 'Spring'
+                        elif month in [6, 7, 8]:
+                            return 'Summer'
+                        elif month in [9, 10, 11]:
+                            return 'Autumn'
+                    
+                    df_clean['Season'] = df_clean['Date'].apply(get_season)
+                    df_clean['DayOfWeek'] = df_clean['Date'].dt.day_name()
+                    india_holidays = holidays.India()
+                    df_clean['IsHoliday'] = df_clean['Date'].apply(lambda x: x in india_holidays)
+
+                    df_clean.to_csv(csv_filename, index=False)
+                    return df_clean
+            else:
+                st.warning(f"No table found for {date_str}")
+                return None
+    except Exception as e:
+        st.error(f"Error occurred while scraping {date_str}: {str(e)}")
+        return None
+
+def getcsvfile(addre, period):
+    df = pd.read_csv(addre)
+    return df
+
+#-----------------------------------------------------------------------------
+# DATA PREDICTION
+
+def prediction(date, model_path):
+    model = joblib.load(model_path)
+    date_obj = pd.to_datetime(date)
+    india_holidays = holidays.India()
+    is_holiday = lambda x: x in india_holidays
+    
+    def get_season(date):
+        month = date.month
+        if month in [12, 1, 2]:
+            return 3
+        elif month in [3, 4, 5]:
+            return 'Spring'
+        elif month in [6, 7, 8]:
+            return 'Summer'
+        elif month in [9, 10, 11]:
+            return 'Autumn'
+
+    timeslots = pd.date_range(start=date, end=date + pd.Timedelta(days=1), freq='5T')[:-1]
+
+    data = {
+        'TIMESLOT': timeslots.strftime('%H:%M').tolist(),
+        'Year': date_obj.year,
+        'Month': date_obj.month,
+        'Day': date_obj.day,
+        'Season': get_season(date),
+        'DayOfWeek': date_obj.weekday(),
+        'IsHoliday': is_holiday(date)
+    }
+    
+    df = pd.DataFrame(data)
+    if model_path == f"{Path(__file__).parent}/scrap/model/delhi_random_forest_model.pkl":
+        n = 0
+        tlist = []
+        TimeSlot = df['TIMESLOT'].astype(str)
+        for i in df["TIMESLOT"]:
+            tlist.append(n)
+            n = n+1
+        df['TIMESLOT'] = tlist
+
+    categorical_features = ['TIMESLOT', 'Season', 'DayOfWeek', 'IsHoliday']
+    for feature in categorical_features:
+        df[feature] = df[feature].astype('category')
+
+    predictions = model.predict(df)
+    df['Prediction'] = predictions
+
+    if model_path == f"{Path(__file__).parent}/scrap/model/delhi_random_forest_model.pkl":
+        df['TIMESLOT'] = TimeSlot
+        df.to_csv(f"{Path(__file__).parent}/scrap/data/pred/delhi_random_forest_model.csv", index=False)
+    elif model_path == f"{Path(__file__).parent}/scrap/model/delhi_lgbm_model.pkl":
+        df.to_csv(f"{Path(__file__).parent}/scrap/data/pred/delhi_lgbm_model.csv", index=False)
+    elif model_path == f"{Path(__file__).parent}/scrap/model/delhi_xgboost_model.pkl":
+        df.to_csv(f"{Path(__file__).parent}/scrap/data/pred/delhi_xgboost_model.csv", index=False)
+    return df
+
+#-----------------------------------------------------------------------------
+# FILTER HOURLY DATA
+
+def filter_hourly_data(df):
+    df['TIMESLOT'] = df['TIMESLOT'].astype(str)
+    hourly_data = df[df['TIMESLOT'].str.endswith(':00')]
+    return hourly_data
+
+#-----------------------------------------------------------------------------
+# PREDICT AND VISUALIZE
+
+def predict_and_visualize(select_date, model_path, efficiency):
+    if model_path == "home":
+        result_df = pd.read_csv(f"{Path(__file__).parent}/scrap/data/pred/delhi_random_forest_model.csv")
+        result_df1 = pd.read_csv(f"{Path(__file__).parent}/scrap/data/pred/delhi_lgbm_model.csv")
+        result_df2 = pd.read_csv(f"{Path(__file__).parent}/scrap/data/pred/delhi_xgboost_model.csv")
+        result_df['Prediction'] = round(((result_df['Prediction'].astype(float)+result_df1['Prediction'].astype(float)+result_df2['Prediction'].astype(float))/3),2)
+    else:
+        result_df = prediction(select_date,model_path)
+
+    # Calculate metrics
+    total_usage = result_df['Prediction'].sum()
+    peak_usage = result_df['Prediction'].max()
+    peak_timeslot = result_df.loc[result_df['Prediction'].idxmax(), 'TIMESLOT']
+    min_usage = result_df['Prediction'].min()
+    min_timeslot = result_df.loc[result_df['Prediction'].idxmin(), 'TIMESLOT']
+
+    # Display metrics
+    st.header("Key Metrics")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown(
+            f"""
+            <div class="stMetric">
+                <div class="metric-label" style="background-color: #3498db;">Model Efficiency</div>
+                <div class="metric-value">{efficiency}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col2:
+        st.markdown(
+            f"""
+            <div class="stMetric">
+                <div class="metric-label" style="background-color: #9b59b6;">Total Usage for Delhi</div>
+                <div class="metric-value">{f"{total_usage:.2f} MW"}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col3:
+        st.markdown(
+            f"""
+            <div class="stMetric">
+                <div class="metric-label" style="background-color: #e74c3c;">Peak Usage</div>
+                <div class="metric-value">{f"{peak_usage:.2f} MW"} <small style="color: #ff0000;">{f"at {peak_timeslot}"}</small></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col4:
+        st.markdown(
+            f"""
+            <div class="stMetric">
+                <div class="metric-label" style="background-color: #2ecc71;">Minimum Usage</div>
+                <div class="metric-value">{f"{min_usage:.2f} MW"} <small style="color: #06a56a;">{f"at {min_timeslot}"}</small></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # Line chart for predictions over time
+    st.header("Predictions Over Time")
+    st.line_chart(filter_hourly_data(result_df).set_index('TIMESLOT')['Prediction'])
+
+    # Bar chart for average predictions by hour
+    st.header("Average Predictions by Hour")
+    result_df['Hour'] = pd.to_datetime(result_df['TIMESLOT'], format='%H:%M').dt.hour
+    hourly_avg = result_df.groupby('Hour')['Prediction'].mean().reset_index()
+    st.bar_chart(hourly_avg.set_index('Hour'))
+
+    # Add Export Section
+    st.header("📥 Export Predictions")
+    st.markdown("Download the prediction data in your preferred format:")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown(download_button(result_df, f'delhi_predictions_{select_date.strftime("%Y%m%d")}.csv', '📄 Download CSV'), unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(download_button(result_df, f'delhi_predictions_{select_date.strftime("%Y%m%d")}.xlsx', '📊 Download Excel'), unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(download_button(result_df, f'delhi_predictions_{select_date.strftime("%Y%m%d")}.json', '🔧 Download JSON'), unsafe_allow_html=True)
+
+    # Use an expander to hide the predictions table
+    with st.expander("View Detailed Predictions Table"):
+        st.dataframe(result_df)
+
+#-----------------------------------------------------------------------------
+# MAIN LAYOUT AND VISUALIZATIONS
+
+# Import data for the selected date
+chart_data = importdata(filedate, 1)
+
+if chart_data is None:
+    st.info("This is predicted data")
+    tab1, tab2, tab3, tab4 = st.tabs(["Home","Random Forest", "LightGBM", "XGBoost"])
+    with tab4:
+        predict_and_visualize(selected_date, f"{Path(__file__).parent}/scrap/model/delhi_xgboost_model.pkl","91.8%")
+    with tab2:
+        predict_and_visualize(selected_date, f"{Path(__file__).parent}/scrap/model/delhi_random_forest_model.pkl","93.2%")
+    with tab3:
+        predict_and_visualize(selected_date, f"{Path(__file__).parent}/scrap/model/delhi_lgbm_model.pkl","92.2%")
+    with tab1:
+        predict_and_visualize(selected_date, "home","92.4%")
+        
+elif chart_data is not None:
+    st.info("This is actual data")
+    hourly_data = filter_hourly_data(chart_data)
+    hourly_data = hourly_data.round(2)
+
+    with st.expander("📂 View Raw Data"):
+        st.dataframe(chart_data, use_container_width=True)
+
+    st.header("📈 Key Metrics")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown(
+            f"""
+            <div class="stMetric">
+                <div class="metric-label" style="background-color: #3498db;">Total DELHI</div>
+                <div class="metric-value">{round(chart_data['DELHI'].sum(), 2)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col2:
+        st.markdown(
+            f"""
+            <div class="stMetric">
+                <div class="metric-label" style="background-color: #2ecc71;">Total BRPL</div>
+                <div class="metric-value">{round(chart_data['BRPL'].sum(), 2)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col3:
+        st.markdown(
+            f"""
+            <div class="stMetric">
+                <div class="metric-label" style="background-color: #e74c3c;">Total BYPL</div>
+                <div class="metric-value">{round(chart_data['BYPL'].sum(), 2)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col4:
+        st.markdown(
+            f"""
+            <div class="stMetric">
+                <div class="metric-label" style="background-color: #9b59b6;">Total Other</div>
+                <div class="metric-value">{round(chart_data['Other'].sum(), 2)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.header("📈 Hourly Load Distribution")
+    st.line_chart(
+        data=hourly_data,
+        x="TIMESLOT",
+        y=["DELHI", "BRPL", "BYPL", "NDPL", "NDMC", "MES", "Other"]
+    )
+
+    st.header("📊 Total Load by Category")
+    total_load = chart_data[["DELHI", "BRPL", "BYPL", "NDPL", "NDMC", "MES", "Other"]].sum().round(2)
+    st.bar_chart(total_load)
+
+    st.header("📊 Cumulative Load Over Time")
+    cumulative_data = hourly_data[["DELHI", "BRPL", "BYPL", "NDPL", "NDMC", "MES", "Other"]].cumsum().round(2)
+    cumulative_data["TIMESLOT"] = hourly_data["TIMESLOT"]
+    st.area_chart(cumulative_data, x="TIMESLOT", y=["DELHI", "BRPL", "BYPL", "NDMC", "MES", "Other"])
+
+else:
+    st.warning("No data available for the selected date.")
