@@ -26,6 +26,15 @@ Welcome to **Delhi Insights**, a powerful Streamlit application designed to prov
 2. **Install Dependencies:**
    ```bash
    pip install -r requirements.txt
+   pip install streamlit
+   pip install pandas
+   pip install requests
+   pip install beautifulsoup4
+   pip install lxml
+   pip install holidays
+   pip install joblib
+   pip install openpyxl
+
    ```
 
 3. **Run the Application:**
